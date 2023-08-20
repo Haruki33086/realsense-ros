@@ -1,22 +1,8 @@
-# Copyright 2023 Intel Corporation. All Rights Reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-import rospy
 import sys
-import tf
+import rclpy
+import geometry_msgs.msg as geometry_msgs
 import tf2_ros
-import geometry_msgs.msg
+# from tf2_py import transformations as tf_trans
 
 import termios
 import tty
@@ -24,6 +10,9 @@ import os
 import time
 import math
 import json
+from rclpy.clock import Clock
+from tf_transformations import euler_from_quaternion, quaternion_from_euler
+
 
 
 def getch():
@@ -32,7 +21,6 @@ def getch():
     try:
         tty.setraw(sys.stdin.fileno())
         ch = sys.stdin.read(1)
-
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
     return ch
@@ -47,45 +35,48 @@ def print_status(status):
 
 
 def publish_status(broadcaster, status):
-    static_transformStamped = geometry_msgs.msg.TransformStamped()
-    static_transformStamped.header.stamp = rospy.Time.now()
-    static_transformStamped.header.frame_id = from_cam
+    time_stamp = Clock().now()
+    static_transform_stamped = geometry_msgs.TransformStamped()
+    static_transform_stamped.header.stamp = time_stamp.to_msg()
+    static_transform_stamped.header.frame_id = status['from_cam']
 
-    static_transformStamped.child_frame_id = to_cam
-    static_transformStamped.transform.translation.x = status['x']['value']
-    static_transformStamped.transform.translation.y = status['y']['value']
-    static_transformStamped.transform.translation.z = status['z']['value']
+    static_transform_stamped.child_frame_id = status['to_cam']
+    static_transform_stamped.transform.translation.x = status['x']['value']
+    static_transform_stamped.transform.translation.y = status['y']['value']
+    static_transform_stamped.transform.translation.z = status['z']['value']
 
-    quat = tf.transformations.quaternion_from_euler(math.radians(status['roll']['value']),
-                                                    math.radians(status['pitch']['value']),
-                                                    math.radians(status['azimuth']['value']))
-    static_transformStamped.transform.rotation.x = quat[0]
-    static_transformStamped.transform.rotation.y = quat[1]
-    static_transformStamped.transform.rotation.z = quat[2]
-    static_transformStamped.transform.rotation.w = quat[3]
-    broadcaster.sendTransform(static_transformStamped)
+    quat = quaternion_from_euler(math.radians(status['roll']['value']),
+                                          math.radians(status['pitch']['value']),
+                                          math.radians(status['azimuth']['value']))
+    static_transform_stamped.transform.rotation.x = quat[0]
+    static_transform_stamped.transform.rotation.y = quat[1]
+    static_transform_stamped.transform.rotation.z = quat[2]
+    static_transform_stamped.transform.rotation.w = quat[3]
+    broadcaster.sendTransform(static_transform_stamped)
 
 
 if __name__ == '__main__':
+    rclpy.init(args=sys.argv)
+    
     if len(sys.argv) < 3:
-        print 'USAGE:'
-        print 'set_cams_transforms.py from_cam to_cam x y z azimuth pitch roll'
-        print 'x, y, z: in meters'
-        print 'azimuth, pitch, roll: in degrees'
-        print
-        print 'If parameters are not given read last used parameters.'
-        print
-        print '[OPTIONS]'
-        print '--file <file name> : if given, default values are loaded from file'
+        print('USAGE:')
+        print('set_cams_transforms.py from_cam to_cam x y z azimuth pitch roll')
+        print('x, y, z: in meters')
+        print('azimuth, pitch, roll: in degrees')
+        print()
+        print('If parameters are not given read last used parameters.')
+        print()
+        print('[OPTIONS]')
+        print('--file <file name> : if given, default values are loaded from file')
         sys.exit(-1)
 
     from_cam, to_cam = sys.argv[1:3]
     try:
         filename = sys.argv[sys.argv.index('--file')+1]
-        print 'Using file %s' % os.path.abspath(filename)
+        print('Using file %s' % os.path.abspath(filename))
     except:
         filename = os.path.join(os.path.dirname(__file__), '_set_cams_info_file.txt')
-        print 'Using default file %s' % os.path.abspath(filename)
+        print('Using default file %s' % os.path.abspath(filename))
 
     if len(sys.argv) >= 9:
         x, y, z, yaw, pitch, roll = [float(arg) for arg in sys.argv[3:10]]
@@ -96,30 +87,32 @@ if __name__ == '__main__':
                   'azimuth': {'value': yaw, 'step': 1},
                   'pitch': {'value': pitch, 'step': 1},
                   'roll': {'value': roll, 'step': 1},
-                  'message': ''}
-        print 'Use given initial values.'
+                  'message': '',
+                  'from_cam': from_cam,
+                  'to_cam': to_cam}
+        print('Use given initial values.')
     else:
         try:
             status = json.load(open(filename, 'r'))
-            print 'Read initial values from file.'
+            print('Read initial values from file.')
         except IOError as e:
-            print 'Failed reading initial parameters from file %s' % filename
-            print 'Initial parameters must be given for initial run or if an un-initialized file has been given.'
+            print('Failed reading initial parameters from file %s' % filename)
+            print('Initial parameters must be given for initial run or if an un-initialized file has been given.')
             sys.exit(-1)
 
-    rospy.init_node('my_static_tf2_broadcaster')
-    broadcaster = tf2_ros.StaticTransformBroadcaster()
+    node = rclpy.create_node('my_static_tf2_broadcaster')
+    broadcaster = tf2_ros.StaticTransformBroadcaster(node)
 
-    print
-    print 'Press the following keys to change mode: x, y, z, (a)zimuth, (p)itch, (r)oll'
-    print 'For each mode, press 6 to increase by step and 4 to decrease'
-    print 'Press + to multiply step by 2 or - to divide'
-    print
-    print 'Press Q to quit'
-    print
+    print()
+    print('Press the following keys to change mode: x, y, z, (a)zimuth, (p)itch, (r)oll')
+    print('For each mode, press 6 to increase by step and 4 to decrease')
+    print('Press + to multiply step by 2 or - to divide')
+    print()
+    print('Press Q to quit')
+    print()
 
-    status_keys = [key[0] for key in status.keys()]
-    print '%-8s%-8s%-8s%s' % ('Mode', 'value', 'step', 'message')
+    status_keys = [key for key in status.keys()]
+    print('%-8s%-8s%-8s%s' % ('Mode', 'value', 'step', 'message'))
     print_status(status)
     publish_status(broadcaster, status)
     while True:
@@ -127,11 +120,11 @@ if __name__ == '__main__':
         status['message'] = ''
         try:
             key_idx = status_keys.index(kk)
-            status['mode'] = status.keys()[key_idx]
+            status['mode'] = status_keys[key_idx]
         except ValueError as e:
             if kk.upper() == 'Q':
                 sys.stdout.write('\n')
-                exit(0)
+                break
             elif kk == '4':
                 status[status['mode']]['value'] -= status[status['mode']]['step']
             elif kk == '6':
@@ -147,4 +140,5 @@ if __name__ == '__main__':
         publish_status(broadcaster, status)
         json.dump(status, open(filename, 'w'), indent=4)
 
-    #rospy.spin()
+    node.destroy_node()
+    rclpy.shutdown()
